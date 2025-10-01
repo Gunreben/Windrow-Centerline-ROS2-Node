@@ -20,13 +20,13 @@ The windrow detection uses a **Height-Grid Ridge** approach:
 | `grid_resolution` | double | `0.10` | Legacy uniform grid resolution (use x/y below) |
 | `x_grid_resolution` | double | `0.10` | Grid cell size in x (meters) |
 | `y_grid_resolution` | double | `0.10` | Grid cell size in y (meters) |
-| `y_min` | double | `1.0` | Minimum y-coordinate (meters) |
-| `y_max` | double | `12.0` | Maximum y-coordinate (meters) |
+| `y_min` | double | `4.0` | Minimum y-coordinate (meters) |
+| `y_max` | double | `20` | Maximum y-coordinate (meters) |
 | `x_min` | double | `-2.0` | Minimum x-coordinate (meters) |
 | `x_max` | double | `2.0` | Maximum x-coordinate (meters) |
 | `ridge_keep_percent` | double | `30.0` | Percentage of top points to keep as ridge |
 | `use_median` | bool | `true` | Use median (true) or mean (false) for height |
-| `min_points_per_cell` | int | `5` | Minimum points required per grid cell |
+| `min_points_per_cell` | int | `3 | Minimum points required per grid cell |
 
 ## Topics
 
@@ -52,12 +52,12 @@ ros2 run windrow_centerline_node windrow_centerline_node --ros-args \
   -p target_frame:=base_link \
   -p x_grid_resolution:=0.40 \
   -p y_grid_resolution:=1.0 \
-  -p y_min:=2.0 \
-  -p y_max:=10.0 \
+  -p y_min:=4.0 \
+  -p y_max:=20.0\
   -p ridge_keep_percent:=25.0
 ```
 
-### Integration with Lidar Filter
+### Integration with [Lidar Filter](https://github.com/Gunreben/lidar_filter)
 ```bash
 # Terminal 1: Run lidar filter
 ros2 run lidar_filter combined_lidar_filter_node --ros-args \
@@ -82,7 +82,7 @@ ros2 run windrow_centerline_node windrow_centerline_node --ros-args \
 
 The detection area is defined by:
 - **X-range**: Typically `-2.0` to `2.0` meters (lateral extent)
-- **Y-range**: Typically `1.0` to `12.0` meters (forward distance)
+- **Y-range**: Typically `4` to `20` meters (forward distance)
 - **Resolution**: independent `x_grid_resolution` and `y_grid_resolution` (e.g., x=0.40m, y=1.0m)
 
 Adjust these parameters based on:
