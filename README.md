@@ -2,6 +2,21 @@
 
 ROS2 node for detecting windrow centerlines using height-grid ridge analysis. This node implements a 2D grid-based approach to find the highest points (ridges) in agricultural windrows and extracts the centerline path.
 
+## Installation
+Clone this repository:
+```bash
+git clone https://github.com/Gunreben/Windrow-Centerline-ROS2-Node.git
+```
+
+Make sure ROS Pointcloud is installed:
+```bash
+sudo apt install ros-<distro>-pcl-ros
+```
+Build:
+```bash
+cd ~/ros2_ws/ && colcon build --packages-select windrow_centerline_node
+```
+
 ## Algorithm
 
 The windrow detection uses a **Height-Grid Ridge** approach:
