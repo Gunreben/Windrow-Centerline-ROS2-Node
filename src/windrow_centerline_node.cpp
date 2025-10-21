@@ -149,6 +149,8 @@ private:
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
     pcl::fromROSMsg(*cloud_msg, *cloud);
     
+    size_t total_points = cloud->size();
+    
     // Transform to target frame if needed
     std::string source_frame = cloud_msg->header.frame_id;
     if (!target_frame_.empty() && source_frame != target_frame_) {
@@ -165,6 +167,15 @@ private:
       }
     }
     
+    // Count points within grid bounds
+    size_t points_in_bounds = 0;
+    for (const auto& point : cloud->points) {
+      if (point.x >= x_min_ && point.x <= x_max_ && 
+          point.y >= y_min_ && point.y <= y_max_) {
+        points_in_bounds++;
+      }
+    }
+    
     // Process windrow detection
     processWindrowDetection(cloud, cloud_msg->header, source_frame);
     
@@ -177,9 +188,13 @@ private:
     double msg_dt = (msg_stamp - last_msg_time).seconds();
     last_msg_time = msg_stamp;
     
+    double percent_in_bounds = (total_points > 0) ? (100.0 * points_in_bounds / total_points) : 0.0;
+    
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-      "Processing: %.2f ms | Input dt: %.2f ms | Ratio: %.2f", 
-      processing_time_ms, msg_dt * 1000.0, processing_time_ms / (msg_dt * 1000.0));
+      "Processing: %.2f ms | Input dt: %.2f ms | Ratio: %.2f | Points: %zu/%zu (%.1f%% in bounds [x:%.1f..%.1f, y:%.1f..%.1f])", 
+      processing_time_ms, msg_dt * 1000.0, processing_time_ms / (msg_dt * 1000.0),
+      points_in_bounds, total_points, percent_in_bounds,
+      x_min_, x_max_, y_min_, y_max_);
     
     // If ratio > 1.0, node's falling behind.
   }
