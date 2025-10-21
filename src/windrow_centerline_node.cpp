@@ -67,6 +67,9 @@ public:
   {
     // Parameters
     this->declare_parameter<std::string>("input_topic", "/ouster/points/filtered");
+    this->declare_parameter<std::string>("output_centerline_topic", "windrow_centerline");
+    this->declare_parameter<std::string>("output_ridge_points_topic", "ridge_points");
+    this->declare_parameter<std::string>("output_markers_topic", "windrow_markers");
     this->declare_parameter<std::string>("target_frame", "base_link");
     this->declare_parameter<double>("grid_resolution", 0.10);
     this->declare_parameter<double>("x_grid_resolution", 0.40);
@@ -78,6 +81,7 @@ public:
     this->declare_parameter<double>("ridge_keep_percent", 30.0);
     this->declare_parameter<bool>("use_median", false); // true for median, false for mean
     this->declare_parameter<int>("min_points_per_cell", 3);
+    this->declare_parameter<int>("smoothing_window", 5);
     
     loadParameters();
     
@@ -87,9 +91,9 @@ public:
     
     // Publishers
     auto sensor_qos = rclcpp::SensorDataQoS();
-    centerline_pub_ = this->create_publisher<geometry_msgs::msg::PoseArray>("windrow_centerline", 10);
-    ridge_points_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("ridge_points", sensor_qos);
-    marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("windrow_markers", 10);
+    centerline_pub_ = this->create_publisher<geometry_msgs::msg::PoseArray>(output_centerline_topic_, 10);
+    ridge_points_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(output_ridge_points_topic_, sensor_qos);
+    marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(output_markers_topic_, 10);
     
     // Subscriber
     sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -115,6 +119,9 @@ public:
 private:
   void loadParameters() {
     input_topic_ = this->get_parameter("input_topic").as_string();
+    output_centerline_topic_ = this->get_parameter("output_centerline_topic").as_string();
+    output_ridge_points_topic_ = this->get_parameter("output_ridge_points_topic").as_string();
+    output_markers_topic_ = this->get_parameter("output_markers_topic").as_string();
     target_frame_ = this->get_parameter("target_frame").as_string();
     grid_resolution_ = this->get_parameter("grid_resolution").as_double();
     x_grid_resolution_ = this->get_parameter("x_grid_resolution").as_double();
@@ -126,6 +133,7 @@ private:
     ridge_keep_percent_ = this->get_parameter("ridge_keep_percent").as_double();
     use_median_ = this->get_parameter("use_median").as_bool();
     min_points_per_cell_ = this->get_parameter("min_points_per_cell").as_int();
+    smoothing_window_ = this->get_parameter("smoothing_window").as_int();
     
     // Calculate grid dimensions
     x_cells_ = static_cast<int>((x_max_ - x_min_) / x_grid_resolution_) + 1;
@@ -173,6 +181,8 @@ private:
     
     // Find ridge centerline
     findRidgeCenterline();
+    // Smooth centerline to reduce zig-zag
+    smoothCenterline();
     
     // Extract ridge points
     extractRidgePoints(cloud);
@@ -247,6 +257,38 @@ private:
         centerline_points_.push_back(pose);
       }
     }
+  }
+
+  void smoothCenterline()
+  {
+    if (centerline_points_.size() < 3) return;
+
+    int window_size = smoothing_window_;
+    if (window_size < 1) window_size = 1;
+    if (window_size % 2 == 0) window_size += 1; // ensure odd for symmetric window
+    int half_window = window_size / 2;
+
+    std::vector<geometry_msgs::msg::Pose> smoothed_points;
+    smoothed_points.reserve(centerline_points_.size());
+
+    for (size_t i = 0; i < centerline_points_.size(); ++i) {
+      int start_idx = std::max(0, static_cast<int>(i) - half_window);
+      int end_idx = std::min(static_cast<int>(centerline_points_.size()) - 1,
+                             static_cast<int>(i) + half_window);
+
+      double sum_x = 0.0;
+      int count = 0;
+      for (int j = start_idx; j <= end_idx; ++j) {
+        sum_x += centerline_points_[j].position.x;
+        count++;
+      }
+
+      geometry_msgs::msg::Pose smoothed_pose = centerline_points_[i];
+      smoothed_pose.position.x = sum_x / static_cast<double>(count);
+      smoothed_points.push_back(smoothed_pose);
+    }
+
+    centerline_points_ = smoothed_points;
   }
   
   void extractRidgePoints(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud)
@@ -372,7 +414,8 @@ private:
           param.get_name().find("_max") != std::string::npos ||
           param.get_name() == "ridge_keep_percent" ||
           param.get_name() == "use_median" ||
-          param.get_name() == "min_points_per_cell") {
+          param.get_name() == "min_points_per_cell" ||
+          param.get_name() == "smoothing_window") {
         needs_reload = true;
       }
     }
@@ -400,6 +443,9 @@ private:
   
   // Parameters
   std::string input_topic_;
+  std::string output_centerline_topic_;
+  std::string output_ridge_points_topic_;
+  std::string output_markers_topic_;
   std::string target_frame_;
   double grid_resolution_;
   double x_grid_resolution_;
@@ -408,6 +454,7 @@ private:
   double ridge_keep_percent_;
   bool use_median_;
   int min_points_per_cell_;
+  int smoothing_window_;
   int x_cells_, y_cells_;
   
   // Processing data
