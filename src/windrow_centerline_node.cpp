@@ -142,6 +142,9 @@ private:
   
   void pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg)
   {
+    auto wall_start = std::chrono::steady_clock::now();  // Wall-clock time!
+    auto msg_stamp = rclcpp::Time(cloud_msg->header.stamp);
+    
     // Convert to PCL
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
     pcl::fromROSMsg(*cloud_msg, *cloud);
@@ -164,6 +167,21 @@ private:
     
     // Process windrow detection
     processWindrowDetection(cloud, cloud_msg->header, source_frame);
+    
+    // Performance timing
+    auto wall_end = std::chrono::steady_clock::now();
+    auto processing_time_ms = std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
+    
+    // Calculate input rate from message timestamps
+    static rclcpp::Time last_msg_time(0, 0, RCL_ROS_TIME);
+    double msg_dt = (msg_stamp - last_msg_time).seconds();
+    last_msg_time = msg_stamp;
+    
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+      "Processing: %.2f ms | Input dt: %.2f ms | Ratio: %.2f", 
+      processing_time_ms, msg_dt * 1000.0, processing_time_ms / (msg_dt * 1000.0));
+    
+    // If ratio > 1.0, node's falling behind.
   }
   
   void processWindrowDetection(
