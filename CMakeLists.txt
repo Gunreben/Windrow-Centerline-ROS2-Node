@@ -16,6 +16,7 @@ find_package(pcl_ros REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io filters)
+find_package(OpenMP REQUIRED)
 
 # Include directories
 include_directories(
@@ -39,7 +40,7 @@ set(WINDROW_DEPS
 # Create executable
 add_executable(windrow_centerline_node src/windrow_centerline_node.cpp)
 ament_target_dependencies(windrow_centerline_node ${WINDROW_DEPS})
-target_link_libraries(windrow_centerline_node ${PCL_LIBRARIES})
+target_link_libraries(windrow_centerline_node ${PCL_LIBRARIES} OpenMP::OpenMP_CXX)
 
 # Install targets
 install(TARGETS

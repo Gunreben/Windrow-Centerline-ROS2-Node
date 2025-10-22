@@ -15,6 +15,7 @@
 #include <vector>
 #include <map>
 #include <cmath>
+#include <omp.h>
 
 struct GridCell {
   std::vector<float> z_values;
@@ -85,6 +86,10 @@ public:
     
     loadParameters();
     
+    // OpenMP setup - automatically detect number of threads
+    num_threads_ = omp_get_max_threads();
+    omp_set_num_threads(num_threads_);
+    
     // TF setup
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -110,6 +115,7 @@ public:
       std::bind(&WindrowCenterlineNode::parameterCallback, this, std::placeholders::_1));
     
     RCLCPP_INFO(this->get_logger(), "Windrow centerline node initialized");
+    RCLCPP_INFO(this->get_logger(), "OpenMP: Using %d threads", num_threads_);
     RCLCPP_INFO(this->get_logger(), "Grid: y[%.1f, %.1f], x[%.1f, %.1f], res=(x=%.2fm, y=%.2fm)", 
                 y_min_, y_max_, x_min_, x_max_, x_grid_resolution_, y_grid_resolution_);
     RCLCPP_INFO(this->get_logger(), "Ridge keep: %.1f%%, %s height metric", 
@@ -142,9 +148,14 @@ private:
   
   void pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg)
   {
+    auto wall_start = std::chrono::steady_clock::now();  // Wall-clock time!
+    auto msg_stamp = rclcpp::Time(cloud_msg->header.stamp);
+    
     // Convert to PCL
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
     pcl::fromROSMsg(*cloud_msg, *cloud);
+    
+    size_t total_points = cloud->size();
     
     // Transform to target frame if needed
     std::string source_frame = cloud_msg->header.frame_id;
@@ -162,8 +173,36 @@ private:
       }
     }
     
+    // Count points within grid bounds
+    size_t points_in_bounds = 0;
+    for (const auto& point : cloud->points) {
+      if (point.x >= x_min_ && point.x <= x_max_ && 
+          point.y >= y_min_ && point.y <= y_max_) {
+        points_in_bounds++;
+      }
+    }
+    
     // Process windrow detection
     processWindrowDetection(cloud, cloud_msg->header, source_frame);
+    
+    // Performance timing
+    auto wall_end = std::chrono::steady_clock::now();
+    auto processing_time_ms = std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
+    
+    // Calculate input rate from message timestamps
+    static rclcpp::Time last_msg_time(0, 0, RCL_ROS_TIME);
+    double msg_dt = (msg_stamp - last_msg_time).seconds();
+    last_msg_time = msg_stamp;
+    
+    double percent_in_bounds = (total_points > 0) ? (100.0 * points_in_bounds / total_points) : 0.0;
+    
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+      "Processing: %.2f ms | Input dt: %.2f ms | Ratio: %.2f | Points: %zu/%zu (%.1f%% in bounds [x:%.1f..%.1f, y:%.1f..%.1f])", 
+      processing_time_ms, msg_dt * 1000.0, processing_time_ms / (msg_dt * 1000.0),
+      points_in_bounds, total_points, percent_in_bounds,
+      x_min_, x_max_, y_min_, y_max_);
+    
+    // If ratio > 1.0, node's falling behind.
   }
   
   void processWindrowDetection(
@@ -203,8 +242,11 @@ private:
       row.resize(y_cells_);
     }
     
-    // Populate grid with points
-    for (const auto& point : cloud->points) {
+    // Populate grid with points - parallelized with critical sections
+    #pragma omp parallel for schedule(dynamic, 1000)
+    for (size_t i = 0; i < cloud->points.size(); ++i) {
+      const auto& point = cloud->points[i];
+      
       // Check if point is within grid bounds
       if (point.x < x_min_ || point.x > x_max_ || 
           point.y < y_min_ || point.y > y_max_) {
@@ -219,16 +261,21 @@ private:
       x_idx = std::max(0, std::min(x_idx, x_cells_ - 1));
       y_idx = std::max(0, std::min(y_idx, y_cells_ - 1));
       
-      // Add point to grid cell
-      grid_[x_idx][y_idx].addPoint(point.z);
+      // Add point to grid cell (thread-safe)
+      #pragma omp critical
+      {
+        grid_[x_idx][y_idx].addPoint(point.z);
+      }
     }
   }
   
   void findRidgeCenterline()
   {
     centerline_points_.clear();
+    std::vector<geometry_msgs::msg::Pose> temp_centerline_points(y_cells_);
     
-    // For each y-row (near to far), find x with maximum height metric
+    // For each y-row (near to far), find x with maximum height metric - parallelized
+    #pragma omp parallel for
     for (int y_idx = 0; y_idx < y_cells_; ++y_idx) {
       double max_height = -std::numeric_limits<double>::max();
       int best_x_idx = -1;
@@ -254,6 +301,16 @@ private:
         pose.position.y = y;
         pose.position.z = max_height;
         pose.orientation.w = 1.0;
+        temp_centerline_points[y_idx] = pose;
+      } else {
+        // Mark as invalid
+        temp_centerline_points[y_idx].orientation.w = 0.0;
+      }
+    }
+    
+    // Collect valid points
+    for (const auto& pose : temp_centerline_points) {
+      if (pose.orientation.w != 0.0) {
         centerline_points_.push_back(pose);
       }
     }
@@ -269,8 +326,10 @@ private:
     int half_window = window_size / 2;
 
     std::vector<geometry_msgs::msg::Pose> smoothed_points;
-    smoothed_points.reserve(centerline_points_.size());
+    smoothed_points.resize(centerline_points_.size());
 
+    // Parallelize smoothing computation
+    #pragma omp parallel for
     for (size_t i = 0; i < centerline_points_.size(); ++i) {
       int start_idx = std::max(0, static_cast<int>(i) - half_window);
       int end_idx = std::min(static_cast<int>(centerline_points_.size()) - 1,
@@ -285,7 +344,7 @@ private:
 
       geometry_msgs::msg::Pose smoothed_pose = centerline_points_[i];
       smoothed_pose.position.x = sum_x / static_cast<double>(count);
-      smoothed_points.push_back(smoothed_pose);
+      smoothed_points[i] = smoothed_pose;
     }
 
     centerline_points_ = smoothed_points;
@@ -295,31 +354,50 @@ private:
   {
     ridge_points_cloud_->clear();
     
-    for (const auto& centerline_point : centerline_points_) {
-      // Find grid cell for this centerline point
-      int x_idx = static_cast<int>((centerline_point.position.x - x_min_) / x_grid_resolution_);
-      int y_idx = static_cast<int>((centerline_point.position.y - y_min_) / y_grid_resolution_);
+    // Thread-local storage for each thread's ridge points
+    std::vector<std::vector<pcl::PointXYZ>> thread_local_points(num_threads_);
+    
+    #pragma omp parallel
+    {
+      int thread_id = omp_get_thread_num();
+      thread_local_points[thread_id].reserve(cloud->size() / 10);
       
-      if (x_idx < 0 || x_idx >= x_cells_ || y_idx < 0 || y_idx >= y_cells_) continue;
-      
-      const auto& cell = grid_[x_idx][y_idx];
-      auto top_z_values = cell.getTopKPercent(ridge_keep_percent_);
-      
-      if (top_z_values.empty()) continue;
-      
-      // Find threshold for top K% points
-      float z_threshold = top_z_values.back(); // Minimum z in top K%
-      
-      // Add all points in nearby area that meet height threshold
-      double search_radius = std::min(x_grid_resolution_, y_grid_resolution_) * 0.7; // Slightly smaller than cell size
-      
-      for (const auto& point : cloud->points) {
-        double dx = point.x - centerline_point.position.x;
-        double dy = point.y - centerline_point.position.y;
+      #pragma omp for
+      for (size_t idx = 0; idx < centerline_points_.size(); ++idx) {
+        const auto& centerline_point = centerline_points_[idx];
         
-        if (std::sqrt(dx*dx + dy*dy) <= search_radius && point.z >= z_threshold) {
-          ridge_points_cloud_->push_back(point);
+        // Find grid cell for this centerline point
+        int x_idx = static_cast<int>((centerline_point.position.x - x_min_) / x_grid_resolution_);
+        int y_idx = static_cast<int>((centerline_point.position.y - y_min_) / y_grid_resolution_);
+        
+        if (x_idx < 0 || x_idx >= x_cells_ || y_idx < 0 || y_idx >= y_cells_) continue;
+        
+        const auto& cell = grid_[x_idx][y_idx];
+        auto top_z_values = cell.getTopKPercent(ridge_keep_percent_);
+        
+        if (top_z_values.empty()) continue;
+        
+        // Find threshold for top K% points
+        float z_threshold = top_z_values.back(); // Minimum z in top K%
+        
+        // Add all points in nearby area that meet height threshold
+        double search_radius = std::min(x_grid_resolution_, y_grid_resolution_) * 0.7; // Slightly smaller than cell size
+        
+        for (const auto& point : cloud->points) {
+          double dx = point.x - centerline_point.position.x;
+          double dy = point.y - centerline_point.position.y;
+          
+          if (std::sqrt(dx*dx + dy*dy) <= search_radius && point.z >= z_threshold) {
+            thread_local_points[thread_id].push_back(point);
+          }
         }
+      }
+    }
+    
+    // Merge all thread-local results
+    for (const auto& local_points : thread_local_points) {
+      for (const auto& point : local_points) {
+        ridge_points_cloud_->push_back(point);
       }
     }
   }
@@ -456,6 +534,7 @@ private:
   int min_points_per_cell_;
   int smoothing_window_;
   int x_cells_, y_cells_;
+  int num_threads_;
   
   // Processing data
   std::vector<std::vector<GridCell>> grid_;
