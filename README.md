@@ -82,6 +82,8 @@ ros2 run windrow_centerline_node windrow_centerline_node --ros-args \
 ```
 
 ### Integration with [Lidar Filter](https://github.com/Gunreben/lidar_filter)
+The integration with LiDAR Filter is optional, since this node runs within the predefined boundaries.
+Since we use the filtering node as preprocessing for different applications you can use it for marginal performance improvements, if you plan to use this node in a bigger software stack.
 ```bash
 # Terminal 1: Run lidar filter
 ros2 run lidar_filter combined_lidar_filter_node --ros-args \
