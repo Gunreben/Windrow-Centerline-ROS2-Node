@@ -1,0 +1,550 @@
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <geometry_msgs/msg/point_stamped.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
+#include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/common/transforms.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_eigen/tf2_eigen.hpp>
+#include <algorithm>
+#include <vector>
+#include <map>
+#include <cmath>
+#include <chrono>
+
+struct GridCell {
+  std::vector<float> z_values;
+  double sum_z = 0.0;
+  int count = 0;
+  
+  void addPoint(float z) {
+    z_values.push_back(z);
+    sum_z += z;
+    count++;
+  }
+  
+  double getMedianZ() const {
+    if (z_values.empty()) return 0.0;
+    
+    std::vector<float> sorted_z = z_values;
+    std::sort(sorted_z.begin(), sorted_z.end());
+    
+    size_t n = sorted_z.size();
+    if (n % 2 == 0) {
+      return (sorted_z[n/2 - 1] + sorted_z[n/2]) / 2.0;
+    } else {
+      return sorted_z[n/2];
+    }
+  }
+  
+  double getMeanZ() const {
+    return count > 0 ? sum_z / count : 0.0;
+  }
+  
+  // Get top K% points by height
+  std::vector<float> getTopKPercent(double k_percent) const {
+    if (z_values.empty()) return {};
+    
+    std::vector<float> sorted_z = z_values;
+    std::sort(sorted_z.rbegin(), sorted_z.rend()); // Sort descending
+    
+    size_t k_count = std::max(1, static_cast<int>(z_values.size() * k_percent / 100.0));
+    k_count = std::min(k_count, sorted_z.size());
+    
+    return std::vector<float>(sorted_z.begin(), sorted_z.begin() + k_count);
+  }
+};
+
+class WindrowCenterlineCentroidNode : public rclcpp::Node
+{
+public:
+  WindrowCenterlineCentroidNode()
+  : Node("windrow_centerline_centroid_node")
+  {
+    // Parameters - same as original node
+    this->declare_parameter<std::string>("input_topic", "/ouster/points/filtered");
+    this->declare_parameter<std::string>("output_centerline_topic", "windrow_centerline");
+    this->declare_parameter<std::string>("output_ridge_points_topic", "ridge_points");
+    this->declare_parameter<std::string>("output_markers_topic", "windrow_markers");
+    this->declare_parameter<std::string>("target_frame", "base_link");
+    this->declare_parameter<double>("grid_resolution", 0.10);
+    this->declare_parameter<double>("x_grid_resolution", 0.40);
+    this->declare_parameter<double>("y_grid_resolution", 1.0);
+    this->declare_parameter<double>("y_min", 4.0);
+    this->declare_parameter<double>("y_max", 10.0);
+    this->declare_parameter<double>("x_min", -2.0);
+    this->declare_parameter<double>("x_max", 2.0);
+    this->declare_parameter<double>("ridge_keep_percent", 30.0);
+    this->declare_parameter<bool>("use_median", false); // true for median, false for mean
+    this->declare_parameter<int>("min_points_per_cell", 3);
+    this->declare_parameter<int>("smoothing_window", 5);
+    
+    // Additional parameter for weighted centroid
+    this->declare_parameter<double>("height_threshold_percentile", 0.5); // Use heights above 50th percentile
+    
+    loadParameters();
+    
+    // TF setup
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+    
+    // Publishers
+    auto sensor_qos = rclcpp::SensorDataQoS();
+    centerline_pub_ = this->create_publisher<geometry_msgs::msg::PoseArray>(output_centerline_topic_, 10);
+    ridge_points_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(output_ridge_points_topic_, sensor_qos);
+    marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(output_markers_topic_, 10);
+    
+    // Subscriber
+    sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+      input_topic_, sensor_qos,
+      std::bind(&WindrowCenterlineCentroidNode::pointCloudCallback, this, std::placeholders::_1));
+    
+    // Visualization timer
+    viz_timer_ = this->create_wall_timer(
+      std::chrono::milliseconds(200),
+      std::bind(&WindrowCenterlineCentroidNode::publishVisualization, this));
+    
+    // Parameter callback
+    parameter_callback_handle_ = this->add_on_set_parameters_callback(
+      std::bind(&WindrowCenterlineCentroidNode::parameterCallback, this, std::placeholders::_1));
+    
+    RCLCPP_INFO(this->get_logger(), "Windrow centerline node (WEIGHTED CENTROID) initialized");
+    RCLCPP_INFO(this->get_logger(), "Grid: y[%.1f, %.1f], x[%.1f, %.1f], res=(x=%.2fm, y=%.2fm)", 
+                y_min_, y_max_, x_min_, x_max_, x_grid_resolution_, y_grid_resolution_);
+    RCLCPP_INFO(this->get_logger(), "Ridge keep: %.1f%%, %s height metric, threshold percentile: %.1f", 
+                ridge_keep_percent_, use_median_ ? "median" : "mean", height_threshold_percentile_);
+  }
+
+private:
+  void loadParameters() {
+    input_topic_ = this->get_parameter("input_topic").as_string();
+    output_centerline_topic_ = this->get_parameter("output_centerline_topic").as_string();
+    output_ridge_points_topic_ = this->get_parameter("output_ridge_points_topic").as_string();
+    output_markers_topic_ = this->get_parameter("output_markers_topic").as_string();
+    target_frame_ = this->get_parameter("target_frame").as_string();
+    grid_resolution_ = this->get_parameter("grid_resolution").as_double();
+    x_grid_resolution_ = this->get_parameter("x_grid_resolution").as_double();
+    y_grid_resolution_ = this->get_parameter("y_grid_resolution").as_double();
+    y_min_ = this->get_parameter("y_min").as_double();
+    y_max_ = this->get_parameter("y_max").as_double();
+    x_min_ = this->get_parameter("x_min").as_double();
+    x_max_ = this->get_parameter("x_max").as_double();
+    ridge_keep_percent_ = this->get_parameter("ridge_keep_percent").as_double();
+    use_median_ = this->get_parameter("use_median").as_bool();
+    min_points_per_cell_ = this->get_parameter("min_points_per_cell").as_int();
+    smoothing_window_ = this->get_parameter("smoothing_window").as_int();
+    height_threshold_percentile_ = this->get_parameter("height_threshold_percentile").as_double();
+    
+    // Calculate grid dimensions
+    x_cells_ = static_cast<int>((x_max_ - x_min_) / x_grid_resolution_) + 1;
+    y_cells_ = static_cast<int>((y_max_ - y_min_) / y_grid_resolution_) + 1;
+  }
+  
+  void pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg)
+  {
+    auto wall_start = std::chrono::steady_clock::now();  // Wall-clock time!
+    auto msg_stamp = rclcpp::Time(cloud_msg->header.stamp);
+    
+    // Convert to PCL
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
+    pcl::fromROSMsg(*cloud_msg, *cloud);
+    
+    size_t total_points = cloud->size();
+    
+    // Transform to target frame if needed
+    std::string source_frame = cloud_msg->header.frame_id;
+    if (!target_frame_.empty() && source_frame != target_frame_) {
+      try {
+        geometry_msgs::msg::TransformStamped tf_stamped =
+          tf_buffer_->lookupTransform(target_frame_, source_frame, tf2::TimePointZero);
+        Eigen::Isometry3d T_eig = tf2::transformToEigen(tf_stamped.transform);
+        pcl::transformPointCloud(*cloud, *cloud, T_eig.cast<float>().matrix());
+        source_frame = target_frame_;
+      } catch (const std::exception &ex) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+          "TF lookup failed (%s -> %s): %s", source_frame.c_str(), target_frame_.c_str(), ex.what());
+        return;
+      }
+    }
+    
+    // Count points within grid bounds
+    size_t points_in_bounds = 0;
+    for (const auto& point : cloud->points) {
+      if (point.x >= x_min_ && point.x <= x_max_ && 
+          point.y >= y_min_ && point.y <= y_max_) {
+        points_in_bounds++;
+      }
+    }
+    
+    // Process windrow detection
+    processWindrowDetection(cloud, cloud_msg->header, source_frame);
+    
+    // Performance timing
+    auto wall_end = std::chrono::steady_clock::now();
+    auto processing_time_ms = std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
+    
+    // Calculate input rate from message timestamps
+    static rclcpp::Time last_msg_time(0, 0, RCL_ROS_TIME);
+    double msg_dt = (msg_stamp - last_msg_time).seconds();
+    last_msg_time = msg_stamp;
+    
+    double percent_in_bounds = (total_points > 0) ? (100.0 * points_in_bounds / total_points) : 0.0;
+    
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+      "[CENTROID] Processing: %.2f ms | Input dt: %.2f ms | Ratio: %.2f | Points: %zu/%zu (%.1f%% in bounds [x:%.1f..%.1f, y:%.1f..%.1f])", 
+      processing_time_ms, msg_dt * 1000.0, processing_time_ms / (msg_dt * 1000.0),
+      points_in_bounds, total_points, percent_in_bounds,
+      x_min_, x_max_, y_min_, y_max_);
+    
+    // If ratio > 1.0, node's falling behind.
+  }
+  
+  void processWindrowDetection(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+    const std_msgs::msg::Header& header,
+    const std::string& frame_id)
+  {
+    // Clear previous data
+    grid_.clear();
+    centerline_points_.clear();
+    ridge_points_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>());
+    
+    // Build 2D height grid
+    buildHeightGrid(cloud);
+    
+    // Find ridge centerline using weighted centroid method
+    findWeightedCentroidCenterline();
+    
+    // Smooth centerline to reduce zig-zag
+    smoothCenterline();
+    
+    // Extract ridge points
+    extractRidgePoints(cloud);
+    
+    // Publish results
+    publishCenterline(header, frame_id);
+    publishRidgePoints(header, frame_id);
+    
+    current_header_ = header;
+    current_frame_id_ = frame_id;
+  }
+  
+  void buildHeightGrid(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud)
+  {
+    // Initialize grid
+    grid_.resize(x_cells_);
+    for (auto& row : grid_) {
+      row.resize(y_cells_);
+    }
+    
+    // Populate grid with points
+    for (const auto& point : cloud->points) {
+      // Check if point is within grid bounds
+      if (point.x < x_min_ || point.x > x_max_ || 
+          point.y < y_min_ || point.y > y_max_) {
+        continue;
+      }
+      
+      // Calculate grid indices
+      int x_idx = static_cast<int>((point.x - x_min_) / x_grid_resolution_);
+      int y_idx = static_cast<int>((point.y - y_min_) / y_grid_resolution_);
+      
+      // Clamp indices
+      x_idx = std::max(0, std::min(x_idx, x_cells_ - 1));
+      y_idx = std::max(0, std::min(y_idx, y_cells_ - 1));
+      
+      // Add point to grid cell
+      grid_[x_idx][y_idx].addPoint(point.z);
+    }
+  }
+  
+  void findWeightedCentroidCenterline()
+  {
+    centerline_points_.clear();
+    
+    // For each y-row (near to far), compute weighted centroid of x positions
+    for (int y_idx = 0; y_idx < y_cells_; ++y_idx) {
+      // First, find the height threshold for this row
+      std::vector<double> row_heights;
+      for (int x_idx = 0; x_idx < x_cells_; ++x_idx) {
+        const auto& cell = grid_[x_idx][y_idx];
+        if (cell.count >= min_points_per_cell_) {
+          double height = use_median_ ? cell.getMedianZ() : cell.getMeanZ();
+          row_heights.push_back(height);
+        }
+      }
+      
+      if (row_heights.empty()) continue;
+      
+      // Calculate threshold based on percentile
+      std::sort(row_heights.begin(), row_heights.end());
+      size_t threshold_idx = static_cast<size_t>(row_heights.size() * height_threshold_percentile_);
+      threshold_idx = std::min(threshold_idx, row_heights.size() - 1);
+      double height_threshold = row_heights[threshold_idx];
+      
+      // Compute weighted centroid
+      double sum_x_weighted = 0.0;
+      double sum_weights = 0.0;
+      double weighted_z = 0.0;
+      
+      for (int x_idx = 0; x_idx < x_cells_; ++x_idx) {
+        const auto& cell = grid_[x_idx][y_idx];
+        if (cell.count < min_points_per_cell_) continue;
+        
+        double height = use_median_ ? cell.getMedianZ() : cell.getMeanZ();
+        
+        // Only consider cells above threshold
+        if (height > height_threshold) {
+          // Weight by height above threshold (linear weighting)
+          double weight = height - height_threshold;
+          
+          // Alternative weighting schemes (uncomment to use):
+          // double weight = (height - height_threshold) * cell.count;  // Height * density
+          // double weight = std::exp(height - height_threshold);       // Exponential
+          // double weight = std::pow(height - height_threshold, 2);    // Quadratic
+          
+          double x_position = x_min_ + x_idx * x_grid_resolution_ + x_grid_resolution_ / 2.0;
+          sum_x_weighted += x_position * weight;
+          weighted_z += height * weight;
+          sum_weights += weight;
+        }
+      }
+      
+      // If we found valid weighted points, create centerline point
+      if (sum_weights > 0) {
+        double centroid_x = sum_x_weighted / sum_weights;
+        double centroid_z = weighted_z / sum_weights;
+        double y = y_min_ + y_idx * y_grid_resolution_ + y_grid_resolution_ / 2.0;
+        
+        geometry_msgs::msg::Pose pose;
+        pose.position.x = centroid_x;
+        pose.position.y = y;
+        pose.position.z = centroid_z;
+        pose.orientation.w = 1.0;
+        centerline_points_.push_back(pose);
+      }
+    }
+  }
+
+  void smoothCenterline()
+  {
+    if (centerline_points_.size() < 3) return;
+
+    int window_size = smoothing_window_;
+    if (window_size < 1) window_size = 1;
+    if (window_size % 2 == 0) window_size += 1; // ensure odd for symmetric window
+    int half_window = window_size / 2;
+
+    std::vector<geometry_msgs::msg::Pose> smoothed_points;
+    smoothed_points.reserve(centerline_points_.size());
+
+    for (size_t i = 0; i < centerline_points_.size(); ++i) {
+      int start_idx = std::max(0, static_cast<int>(i) - half_window);
+      int end_idx = std::min(static_cast<int>(centerline_points_.size()) - 1,
+                             static_cast<int>(i) + half_window);
+
+      double sum_x = 0.0;
+      int count = 0;
+      for (int j = start_idx; j <= end_idx; ++j) {
+        sum_x += centerline_points_[j].position.x;
+        count++;
+      }
+
+      geometry_msgs::msg::Pose smoothed_pose = centerline_points_[i];
+      smoothed_pose.position.x = sum_x / static_cast<double>(count);
+      smoothed_points.push_back(smoothed_pose);
+    }
+
+    centerline_points_ = smoothed_points;
+  }
+  
+  void extractRidgePoints(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud)
+  {
+    ridge_points_cloud_->clear();
+    
+    for (const auto& centerline_point : centerline_points_) {
+      // Find grid cell for this centerline point
+      int x_idx = static_cast<int>((centerline_point.position.x - x_min_) / x_grid_resolution_);
+      int y_idx = static_cast<int>((centerline_point.position.y - y_min_) / y_grid_resolution_);
+      
+      if (x_idx < 0 || x_idx >= x_cells_ || y_idx < 0 || y_idx >= y_cells_) continue;
+      
+      const auto& cell = grid_[x_idx][y_idx];
+      auto top_z_values = cell.getTopKPercent(ridge_keep_percent_);
+      
+      if (top_z_values.empty()) continue;
+      
+      // Find threshold for top K% points
+      float z_threshold = top_z_values.back(); // Minimum z in top K%
+      
+      // Add all points in nearby area that meet height threshold
+      double search_radius = std::min(x_grid_resolution_, y_grid_resolution_) * 0.7; // Slightly smaller than cell size
+      
+      for (const auto& point : cloud->points) {
+        double dx = point.x - centerline_point.position.x;
+        double dy = point.y - centerline_point.position.y;
+        
+        if (std::sqrt(dx*dx + dy*dy) <= search_radius && point.z >= z_threshold) {
+          ridge_points_cloud_->push_back(point);
+        }
+      }
+    }
+  }
+  
+  void publishCenterline(const std_msgs::msg::Header& header, const std::string& frame_id)
+  {
+    geometry_msgs::msg::PoseArray centerline_msg;
+    centerline_msg.header = header;
+    centerline_msg.header.frame_id = frame_id;
+    centerline_msg.poses = centerline_points_;
+    
+    centerline_pub_->publish(centerline_msg);
+  }
+  
+  void publishRidgePoints(const std_msgs::msg::Header& header, const std::string& frame_id)
+  {
+    if (ridge_points_cloud_->empty()) return;
+    
+    ridge_points_cloud_->width = ridge_points_cloud_->size();
+    ridge_points_cloud_->height = 1;
+    ridge_points_cloud_->is_dense = true;
+    
+    sensor_msgs::msg::PointCloud2 ridge_msg;
+    pcl::toROSMsg(*ridge_points_cloud_, ridge_msg);
+    ridge_msg.header = header;
+    ridge_msg.header.frame_id = frame_id;
+    
+    ridge_points_pub_->publish(ridge_msg);
+  }
+  
+  void publishVisualization()
+  {
+    if (centerline_points_.empty()) return;
+    
+    visualization_msgs::msg::MarkerArray marker_array;
+    
+    // Centerline path marker (use different color - cyan for centroid method)
+    visualization_msgs::msg::Marker line_marker;
+    line_marker.header.frame_id = current_frame_id_;
+    line_marker.header.stamp = this->now();
+    line_marker.ns = "windrow_centerline_centroid";
+    line_marker.id = 0;
+    line_marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    line_marker.action = visualization_msgs::msg::Marker::ADD;
+    line_marker.scale.x = 0.1; // Line width
+    line_marker.color.r = 0.0;
+    line_marker.color.g = 1.0;
+    line_marker.color.b = 1.0;  // Cyan to distinguish from ridge method
+    line_marker.color.a = 0.8;
+    line_marker.lifetime = rclcpp::Duration(1, 0);
+    
+    for (const auto& pose : centerline_points_) {
+      line_marker.points.push_back(pose.position);
+    }
+    marker_array.markers.push_back(line_marker);
+    
+    // Centerline points marker
+    visualization_msgs::msg::Marker points_marker;
+    points_marker.header.frame_id = current_frame_id_;
+    points_marker.header.stamp = this->now();
+    points_marker.ns = "windrow_points_centroid";
+    points_marker.id = 1;
+    points_marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
+    points_marker.action = visualization_msgs::msg::Marker::ADD;
+    points_marker.scale.x = 0.2;
+    points_marker.scale.y = 0.2;
+    points_marker.scale.z = 0.2;
+    points_marker.color.r = 0.0;
+    points_marker.color.g = 1.0;
+    points_marker.color.b = 1.0;  // Cyan
+    points_marker.color.a = 0.9;
+    points_marker.lifetime = rclcpp::Duration(1, 0);
+    
+    for (const auto& pose : centerline_points_) {
+      points_marker.points.push_back(pose.position);
+    }
+    marker_array.markers.push_back(points_marker);
+    
+    marker_pub_->publish(marker_array);
+  }
+  
+  rcl_interfaces::msg::SetParametersResult parameterCallback(
+    const std::vector<rclcpp::Parameter>& parameters)
+  {
+    auto result = rcl_interfaces::msg::SetParametersResult();
+    result.successful = true;
+    
+    bool needs_reload = false;
+    for (const auto& param : parameters) {
+      if (param.get_name().find("grid_") != std::string::npos ||
+          param.get_name().find("_min") != std::string::npos ||
+          param.get_name().find("_max") != std::string::npos ||
+          param.get_name() == "ridge_keep_percent" ||
+          param.get_name() == "use_median" ||
+          param.get_name() == "min_points_per_cell" ||
+          param.get_name() == "smoothing_window" ||
+          param.get_name() == "height_threshold_percentile") {
+        needs_reload = true;
+      }
+    }
+    
+    if (needs_reload) {
+      loadParameters();
+      RCLCPP_INFO(this->get_logger(), "Parameters updated - Grid: y[%.1f, %.1f], x[%.1f, %.1f], res=(x=%.2fm, y=%.2fm)", 
+                  y_min_, y_max_, x_min_, x_max_, x_grid_resolution_, y_grid_resolution_);
+    }
+    
+    return result;
+  }
+
+  // ROS components
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr centerline_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr ridge_points_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
+  rclcpp::TimerBase::SharedPtr viz_timer_;
+  OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
+  
+  // TF
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+  
+  // Parameters
+  std::string input_topic_;
+  std::string output_centerline_topic_;
+  std::string output_ridge_points_topic_;
+  std::string output_markers_topic_;
+  std::string target_frame_;
+  double grid_resolution_;
+  double x_grid_resolution_;
+  double y_grid_resolution_;
+  double y_min_, y_max_, x_min_, x_max_;
+  double ridge_keep_percent_;
+  bool use_median_;
+  int min_points_per_cell_;
+  int smoothing_window_;
+  int x_cells_, y_cells_;
+  double height_threshold_percentile_;  // Additional parameter for weighted centroid
+  
+  // Processing data
+  std::vector<std::vector<GridCell>> grid_;
+  std::vector<geometry_msgs::msg::Pose> centerline_points_;
+  pcl::PointCloud<pcl::PointXYZ>::Ptr ridge_points_cloud_;
+  
+  // Visualization
+  std_msgs::msg::Header current_header_;
+  std::string current_frame_id_;
+};
+
+int main(int argc, char* argv[])
+{
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<WindrowCenterlineCentroidNode>());
+  rclcpp::shutdown();
+  return 0;
+}
