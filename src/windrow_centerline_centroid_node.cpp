@@ -335,7 +335,7 @@ private:
     
     for (const auto& centerline_point : centerline_points_) {
       // Find grid cell for this centerline point
-      int x_idx = static_cast<int>((centerline_point.position.x - x_min_) / _);
+      int x_idx = static_cast<int>((centerline_point.position.x - x_min_) / x_grid_resolution_);
       int y_idx = static_cast<int>((centerline_point.position.y - y_min_) / y_grid_resolution_);
       
       if (x_idx < 0 || x_idx >= x_cells_ || y_idx < 0 || y_idx >= y_cells_) continue;
@@ -514,4 +514,3 @@ int main(int argc, char* argv[])
   rclcpp::shutdown();
   return 0;
 }
-

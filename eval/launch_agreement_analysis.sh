@@ -66,11 +66,12 @@ gnome-terminal --title="ZED Centerline" -- bash -c "
     source /opt/ros/humble/setup.bash
     source ~/ros2_ws/install/setup.bash
     echo -e '${GREEN}Starting ZED centerline detection...${NC}'
-    ros2 run windrow_centerline_node windrow_centerline_centroid_node --ros-args \
+    ros2 run windrow_centerline_node windrow_centerline_node --ros-args \
       -r __ns:=/zed \
       -p input_topic:=/zed/zed_node/point_cloud/cloud_registered/filtered \
       -p output_centerline_topic:=/zed/windrow_centerline \
-      -p target_frame:=base_link
+      -p target_frame:=base_link \
+      -p y_max:=10.0
     exec bash
 " &
 
@@ -82,11 +83,12 @@ gnome-terminal --title="Ouster Centerline" -- bash -c "
     source /opt/ros/humble/setup.bash
     source ~/ros2_ws/install/setup.bash
     echo -e '${GREEN}Starting Ouster centerline detection...${NC}'
-    ros2 run windrow_centerline_node windrow_centerline_centroid_node --ros-args \
+    ros2 run windrow_centerline_node windrow_centerline_node --ros-args \
       -r __ns:=/ouster \
       -p input_topic:=/ouster/points \
       -p output_centerline_topic:=/ouster/windrow_centerline \
-      -p target_frame:=base_link
+      -p target_frame:=base_link \
+      -p y_max:=10.0
     exec bash
 " &
 
