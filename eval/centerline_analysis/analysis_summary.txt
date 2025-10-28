@@ -1,0 +1,40 @@
+================================================================================
+CENTERLINE AGREEMENT ANALYSIS SUMMARY
+================================================================================
+
+Total Frames Analyzed: 164
+
+AGREEMENT STATISTICS:
+  Mean Score:   0.9623
+  Median Score: 0.9698
+  Std Dev:      0.0244
+  Min Score:    0.8384
+  Max Score:    0.9917
+
+LATERAL OFFSET STATISTICS (X position relative to base_link):
+  ZED Centerline:
+    Mean Offset:  -0.1092 m (left of center)
+    Std Dev:      0.1390 m
+    Total Points: 1045
+  Ouster Centerline:
+    Mean Offset:  -0.1519 m (left of center)
+    Std Dev:      0.2087 m
+    Total Points: 2544
+  Lateral Difference (ZED - Ouster):
+    Mean:         +0.0427 m
+
+--------------------------------------------------------------------------------
+BEST FRAMES (Highest Agreement):
+--------------------------------------------------------------------------------
+  #1: Frame   84 | Score: 0.9917 | Timestamp: 11634.11s
+  #2: Frame   16 | Score: 0.9917 | Timestamp: 11566.11s
+  #3: Frame   49 | Score: 0.9911 | Timestamp: 11599.06s
+
+--------------------------------------------------------------------------------
+WORST FRAMES (Lowest Agreement):
+--------------------------------------------------------------------------------
+  #1: Frame   95 | Score: 0.8384 | Timestamp: 11645.11s
+  #2: Frame   94 | Score: 0.8683 | Timestamp: 11644.11s
+  #3: Frame   26 | Score: 0.8886 | Timestamp: 11576.11s
+
+================================================================================

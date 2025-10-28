@@ -59,13 +59,13 @@ struct GridCell {
   }
 };
 
-class WindrowCenterlineNode : public rclcpp::Node
+class WindrowCenterlineCentroidNode : public rclcpp::Node
 {
 public:
-  WindrowCenterlineNode()
-  : Node("windrow_centerline_node")
+  WindrowCenterlineCentroidNode()
+  : Node("windrow_centerline_centroid_node")
   {
-    // Parameters
+    // Parameters - same as original node
     this->declare_parameter<std::string>("input_topic", "/ouster/points/filtered");
     this->declare_parameter<std::string>("output_centerline_topic", "windrow_centerline");
     this->declare_parameter<std::string>("output_ridge_points_topic", "ridge_points");
@@ -83,6 +83,9 @@ public:
     this->declare_parameter<int>("min_points_per_cell", 3);
     this->declare_parameter<int>("smoothing_window", 5);
     
+    // Additional parameter for weighted centroid
+    this->declare_parameter<double>("height_threshold_percentile", 0.5); // Use heights above 50th percentile
+    
     loadParameters();
     
     // TF setup
@@ -98,22 +101,22 @@ public:
     // Subscriber
     sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       input_topic_, sensor_qos,
-      std::bind(&WindrowCenterlineNode::pointCloudCallback, this, std::placeholders::_1));
+      std::bind(&WindrowCenterlineCentroidNode::pointCloudCallback, this, std::placeholders::_1));
     
     // Visualization timer
     viz_timer_ = this->create_wall_timer(
       std::chrono::milliseconds(200),
-      std::bind(&WindrowCenterlineNode::publishVisualization, this));
+      std::bind(&WindrowCenterlineCentroidNode::publishVisualization, this));
     
     // Parameter callback
     parameter_callback_handle_ = this->add_on_set_parameters_callback(
-      std::bind(&WindrowCenterlineNode::parameterCallback, this, std::placeholders::_1));
+      std::bind(&WindrowCenterlineCentroidNode::parameterCallback, this, std::placeholders::_1));
     
-    RCLCPP_INFO(this->get_logger(), "Windrow centerline node initialized");
+    RCLCPP_INFO(this->get_logger(), "Windrow centerline node (WEIGHTED CENTROID) initialized");
     RCLCPP_INFO(this->get_logger(), "Grid: y[%.1f, %.1f], x[%.1f, %.1f], res=(x=%.2fm, y=%.2fm)", 
                 y_min_, y_max_, x_min_, x_max_, x_grid_resolution_, y_grid_resolution_);
-    RCLCPP_INFO(this->get_logger(), "Ridge keep: %.1f%%, %s height metric", 
-                ridge_keep_percent_, use_median_ ? "median" : "mean");
+    RCLCPP_INFO(this->get_logger(), "Ridge keep: %.1f%%, %s height metric, threshold percentile: %.1f", 
+                ridge_keep_percent_, use_median_ ? "median" : "mean", height_threshold_percentile_);
   }
 
 private:
@@ -134,6 +137,7 @@ private:
     use_median_ = this->get_parameter("use_median").as_bool();
     min_points_per_cell_ = this->get_parameter("min_points_per_cell").as_int();
     smoothing_window_ = this->get_parameter("smoothing_window").as_int();
+    height_threshold_percentile_ = this->get_parameter("height_threshold_percentile").as_double();
     
     // Calculate grid dimensions
     x_cells_ = static_cast<int>((x_max_ - x_min_) / x_grid_resolution_) + 1;
@@ -179,8 +183,9 @@ private:
     // Build 2D height grid
     buildHeightGrid(cloud);
     
-    // Find ridge centerline
-    findRidgeCenterline();
+    // Find ridge centerline using weighted centroid method
+    findWeightedCentroidCenterline();
+    
     // Smooth centerline to reduce zig-zag
     smoothCenterline();
     
@@ -224,35 +229,68 @@ private:
     }
   }
   
-  void findRidgeCenterline()
+  void findWeightedCentroidCenterline()
   {
     centerline_points_.clear();
     
-    // For each y-row (near to far), find x with maximum height metric
+    // For each y-row (near to far), compute weighted centroid of x positions
     for (int y_idx = 0; y_idx < y_cells_; ++y_idx) {
-      double max_height = -std::numeric_limits<double>::max();
-      int best_x_idx = -1;
+      // First, find the height threshold for this row
+      std::vector<double> row_heights;
+      for (int x_idx = 0; x_idx < x_cells_; ++x_idx) {
+        const auto& cell = grid_[x_idx][y_idx];
+        if (cell.count >= min_points_per_cell_) {
+          double height = use_median_ ? cell.getMedianZ() : cell.getMeanZ();
+          row_heights.push_back(height);
+        }
+      }
       
-      // Scan from left (-x) to right (+x) in this y-row
+      if (row_heights.empty()) continue;
+      
+      // Calculate threshold based on percentile
+      std::sort(row_heights.begin(), row_heights.end());
+      size_t threshold_idx = static_cast<size_t>(row_heights.size() * height_threshold_percentile_);
+      threshold_idx = std::min(threshold_idx, row_heights.size() - 1);
+      double height_threshold = row_heights[threshold_idx];
+      
+      // Compute weighted centroid
+      double sum_x_weighted = 0.0;
+      double sum_weights = 0.0;
+      double weighted_z = 0.0;
+      
       for (int x_idx = 0; x_idx < x_cells_; ++x_idx) {
         const auto& cell = grid_[x_idx][y_idx];
         if (cell.count < min_points_per_cell_) continue;
         
         double height = use_median_ ? cell.getMedianZ() : cell.getMeanZ();
-        if (height > max_height) {
-          max_height = height;
-          best_x_idx = x_idx;
+        
+        // Only consider cells above threshold
+        if (height > height_threshold) {
+          // Weight by height above threshold (linear weighting)
+          double weight = height - height_threshold;
+          
+          // Alternative weighting schemes (uncomment to use):
+          // double weight = (height - height_threshold) * cell.count;  // Height * density
+          // double weight = std::exp(height - height_threshold);       // Exponential
+          // double weight = std::pow(height - height_threshold, 2);    // Quadratic
+          
+          double x_position = x_min_ + x_idx * x_grid_resolution_ + x_grid_resolution_ / 2.0;
+          sum_x_weighted += x_position * weight;
+          weighted_z += height * weight;
+          sum_weights += weight;
         }
       }
       
-      if (best_x_idx >= 0) {
-        double x = x_min_ + best_x_idx * x_grid_resolution_;
-        double y = y_min_ + y_idx * y_grid_resolution_;
+      // If we found valid weighted points, create centerline point
+      if (sum_weights > 0) {
+        double centroid_x = sum_x_weighted / sum_weights;
+        double centroid_z = weighted_z / sum_weights;
+        double y = y_min_ + y_idx * y_grid_resolution_ + y_grid_resolution_ / 2.0;
         
         geometry_msgs::msg::Pose pose;
-        pose.position.x = x;
+        pose.position.x = centroid_x;
         pose.position.y = y;
-        pose.position.z = max_height;
+        pose.position.z = centroid_z;
         pose.orientation.w = 1.0;
         centerline_points_.push_back(pose);
       }
@@ -297,7 +335,7 @@ private:
     
     for (const auto& centerline_point : centerline_points_) {
       // Find grid cell for this centerline point
-      int x_idx = static_cast<int>((centerline_point.position.x - x_min_) / x_grid_resolution_);
+      int x_idx = static_cast<int>((centerline_point.position.x - x_min_) / _);
       int y_idx = static_cast<int>((centerline_point.position.y - y_min_) / y_grid_resolution_);
       
       if (x_idx < 0 || x_idx >= x_cells_ || y_idx < 0 || y_idx >= y_cells_) continue;
@@ -356,18 +394,18 @@ private:
     
     visualization_msgs::msg::MarkerArray marker_array;
     
-    // Centerline path marker
+    // Centerline path marker (use different color - cyan for centroid method)
     visualization_msgs::msg::Marker line_marker;
     line_marker.header.frame_id = current_frame_id_;
     line_marker.header.stamp = this->now();
-    line_marker.ns = "windrow_centerline";
+    line_marker.ns = "windrow_centerline_centroid";
     line_marker.id = 0;
     line_marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
     line_marker.action = visualization_msgs::msg::Marker::ADD;
     line_marker.scale.x = 0.1; // Line width
-    line_marker.color.r = 1.0;
-    line_marker.color.g = 0.0;
-    line_marker.color.b = 0.0;
+    line_marker.color.r = 0.0;
+    line_marker.color.g = 1.0;
+    line_marker.color.b = 1.0;  // Cyan to distinguish from ridge method
     line_marker.color.a = 0.8;
     line_marker.lifetime = rclcpp::Duration(1, 0);
     
@@ -380,16 +418,16 @@ private:
     visualization_msgs::msg::Marker points_marker;
     points_marker.header.frame_id = current_frame_id_;
     points_marker.header.stamp = this->now();
-    points_marker.ns = "windrow_points";
+    points_marker.ns = "windrow_points_centroid";
     points_marker.id = 1;
     points_marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
     points_marker.action = visualization_msgs::msg::Marker::ADD;
     points_marker.scale.x = 0.2;
     points_marker.scale.y = 0.2;
     points_marker.scale.z = 0.2;
-    points_marker.color.r = 1.0;
+    points_marker.color.r = 0.0;
     points_marker.color.g = 1.0;
-    points_marker.color.b = 0.0;
+    points_marker.color.b = 1.0;  // Cyan
     points_marker.color.a = 0.9;
     points_marker.lifetime = rclcpp::Duration(1, 0);
     
@@ -415,15 +453,16 @@ private:
           param.get_name() == "ridge_keep_percent" ||
           param.get_name() == "use_median" ||
           param.get_name() == "min_points_per_cell" ||
-          param.get_name() == "smoothing_window") {
+          param.get_name() == "smoothing_window" ||
+          param.get_name() == "height_threshold_percentile") {
         needs_reload = true;
       }
     }
     
     if (needs_reload) {
       loadParameters();
-      RCLCPP_INFO(this->get_logger(), "Parameters updated - Grid: y[%.1f, %.1f], x[%.1f, %.1f], res=%.2fm", 
-                  y_min_, y_max_, x_min_, x_max_, grid_resolution_);
+      RCLCPP_INFO(this->get_logger(), "Parameters updated - Grid: y[%.1f, %.1f], x[%.1f, %.1f], res=(x=%.2fm, y=%.2fm)", 
+                  y_min_, y_max_, x_min_, x_max_, x_grid_resolution_, y_grid_resolution_);
     }
     
     return result;
@@ -456,6 +495,7 @@ private:
   int min_points_per_cell_;
   int smoothing_window_;
   int x_cells_, y_cells_;
+  double height_threshold_percentile_;  // Additional parameter for weighted centroid
   
   // Processing data
   std::vector<std::vector<GridCell>> grid_;
@@ -470,7 +510,8 @@ private:
 int main(int argc, char* argv[])
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<WindrowCenterlineNode>());
+  rclcpp::spin(std::make_shared<WindrowCenterlineCentroidNode>());
   rclcpp::shutdown();
   return 0;
 }
+
