@@ -173,15 +173,18 @@ class CenterlineAgreementAnalyzer(Node):
             ax.plot(oust_x, oust_y, 'r-', linewidth=2, label='LiDAR', alpha=0.7)
             ax.scatter(oust_x, oust_y, c='red', s=20, alpha=0.5)
         
-        ax.set_xlabel('X (m) - Lateral', fontsize=12)
-        ax.set_ylabel('Y (m) - Forward', fontsize=12)
+        ax.set_xlabel('X (m) - Lateral', fontsize=24)
+        ax.set_ylabel('Y (m) - Forward', fontsize=24)
         ax.set_title(f'Agreement Score: {score:.3f} | Timestamp: {timestamp:.2f}s', 
-                    fontsize=14, fontweight='bold')
-        ax.legend(fontsize=11)
+                    fontsize=28, fontweight='bold')
+        ax.legend(fontsize=22)
         ax.grid(True, alpha=0.3)
         
         # Set X-axis limits to ±1m for better zoom
         ax.set_xlim(-1.0, 1.0)
+        
+        # Increase tick label size
+        ax.tick_params(axis='both', which='major', labelsize=20)
         
         # Keep aspect ratio but allow different scales for x and y
         ax.set_aspect('auto')
@@ -385,19 +388,23 @@ class CenterlineAgreementAnalyzer(Node):
                       edgecolors='darkred', linewidth=2, zorder=10,
                       label=f'Worst (Frame {wf["frame"]})' if wf == self.worst_frames[0] else '')
         
-        ax.set_xlabel('Time (seconds)', fontsize=12)
-        ax.set_ylabel('Agreement Score', fontsize=12)
-        ax.set_title('Centerline Agreement Score Over Time', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Time (seconds)', fontsize=24)
+        ax.set_ylabel('Agreement Score', fontsize=24)
+        ax.set_title('Centerline Agreement Score Over Time', fontsize=28, fontweight='bold')
         ax.grid(True, alpha=0.3)
         ax.set_ylim(-0.05, 1.05)
+        
+        # Increase tick label size
+        ax.tick_params(axis='both', which='major', labelsize=20)
         
         # Add colorbar
         sm = plt.cm.ScalarMappable(cmap='RdYlGn', norm=plt.Normalize(vmin=0, vmax=1))
         sm.set_array([])
         cbar = plt.colorbar(sm, ax=ax)
-        cbar.set_label('Agreement Score', rotation=270, labelpad=20)
+        cbar.set_label('Agreement Score', rotation=270, labelpad=30, fontsize=24)
+        cbar.ax.tick_params(labelsize=20)
         
-        ax.legend(loc='best')
+        ax.legend(loc='best', fontsize=22)
         
         filepath = os.path.join(self.output_dir, 'score_timeline.png')
         plt.savefig(filepath, dpi=150, bbox_inches='tight')
