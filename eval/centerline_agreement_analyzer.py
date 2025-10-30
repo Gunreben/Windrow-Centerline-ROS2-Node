@@ -179,7 +179,12 @@ class CenterlineAgreementAnalyzer(Node):
                     fontsize=14, fontweight='bold')
         ax.legend(fontsize=11)
         ax.grid(True, alpha=0.3)
-        ax.axis('equal')
+        
+        # Set X-axis limits to ±1m for better zoom
+        ax.set_xlim(-1.0, 1.0)
+        
+        # Keep aspect ratio but allow different scales for x and y
+        ax.set_aspect('auto')
         
         if save:
             if filename is None:
@@ -265,7 +270,9 @@ class CenterlineAgreementAnalyzer(Node):
                     'rank': i + 1,
                     'frame': f['frame'],
                     'score': f['score'],
-                    'timestamp': f['timestamp']
+                    'timestamp': f['timestamp'],
+                    'zed_centerline': f['zed_centerline'],
+                    'ouster_centerline': f['ouster_centerline']
                 } for i, f in enumerate(self.best_frames)
             ],
             'worst_frames': [
@@ -273,7 +280,9 @@ class CenterlineAgreementAnalyzer(Node):
                     'rank': i + 1,
                     'frame': f['frame'],
                     'score': f['score'],
-                    'timestamp': f['timestamp']
+                    'timestamp': f['timestamp'],
+                    'zed_centerline': f['zed_centerline'],
+                    'ouster_centerline': f['ouster_centerline']
                 } for i, f in enumerate(self.worst_frames)
             ],
             'all_scores': self.scores_history
@@ -322,14 +331,18 @@ class CenterlineAgreementAnalyzer(Node):
                 f.write(f'  #{bf["rank"]}: Frame {bf["frame"]:4d} | '
                        f'Score: {bf["score"]:.4f} | '
                        f'Timestamp: {bf["timestamp"]:.2f}s\n')
+                f.write(f'    ZED Centerline (x,y): {bf["zed_centerline"]}\n')
+                f.write(f'    Ouster Centerline (x,y): {bf["ouster_centerline"]}\n\n')
             
-            f.write('\n' + '-' * 80 + '\n')
+            f.write('-' * 80 + '\n')
             f.write('WORST FRAMES (Lowest Agreement):\n')
             f.write('-' * 80 + '\n')
             for wf in summary['worst_frames']:
                 f.write(f'  #{wf["rank"]}: Frame {wf["frame"]:4d} | '
                        f'Score: {wf["score"]:.4f} | '
                        f'Timestamp: {wf["timestamp"]:.2f}s\n')
+                f.write(f'    ZED Centerline (x,y): {wf["zed_centerline"]}\n')
+                f.write(f'    Ouster Centerline (x,y): {wf["ouster_centerline"]}\n\n')
             
             f.write('\n' + '=' * 80 + '\n')
         
