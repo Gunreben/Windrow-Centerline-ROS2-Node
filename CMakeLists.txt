@@ -41,14 +41,9 @@ add_executable(windrow_centerline_node src/windrow_centerline_node.cpp)
 ament_target_dependencies(windrow_centerline_node ${WINDROW_DEPS})
 target_link_libraries(windrow_centerline_node ${PCL_LIBRARIES})
 
-add_executable(windrow_centerline_centroid_node src/windrow_centerline_centroid_node.cpp)
-ament_target_dependencies(windrow_centerline_centroid_node ${WINDROW_DEPS})
-target_link_libraries(windrow_centerline_centroid_node ${PCL_LIBRARIES})
-
 # Install targets
 install(TARGETS
   windrow_centerline_node
-  windrow_centerline_centroid_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
