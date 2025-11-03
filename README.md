@@ -1,6 +1,6 @@
 # Windrow Centerline Node
 
-ROS2 node for detecting windrow centerlines using height-grid ridge analysis. This node implements a 2D grid-based approach to find the highest points (ridges) in agricultural windrows and extracts the centerline path.
+ROS2 node for detecting windrow centerlines using a weighted centroid approach. This node implements a 2D grid-based algorithm that identifies the centerline by computing weighted centroids of the highest points in agricultural windrows.
 
 ## Installation
 Clone this repository:
@@ -19,12 +19,16 @@ cd ~/ros2_ws/ && colcon build --packages-select windrow_centerline_node
 
 ## Algorithm
 
-The windrow detection uses a **Height-Grid Ridge** approach:
+The windrow detection uses a **Weighted Centroid** approach:
 
-1. **Build 2D Grid**: Creates a grid over the specified area with configurable per-axis resolution
-2. **Height Analysis (near-to-far)**: For each y-row (near to far), scans x from left→right and picks the x-cell with maximum height (median or mean z-value)
-3. **Ridge Extraction**: Around each centerline point, keeps the top K% of points by height
-4. **Centerline Generation**: Produces a continuous path representing the windrow center
+1. **Build 2D Grid**: Creates a grid over the specified area with configurable per-axis resolution (x and y)
+2. **Height Analysis**: For each y-row (near to far), computes the height distribution across all x-cells
+3. **Threshold Calculation**: Determines a height threshold per row using a percentile-based approach
+4. **Weighted Centroid**: Computes the centerline x-position by taking a weighted average of all cells above the threshold, where weights are proportional to height above threshold
+5. **Smoothing**: Applies moving average smoothing to reduce noise in the centerline
+6. **Ridge Extraction**: Around each centerline point, keeps the top K% of points by height
+
+This method provides more robust and accurate centerline detection compared to simple maximum-finding, especially when windrows have irregular shapes or varying heights.
 
 ## Parameters
 
@@ -46,6 +50,7 @@ The windrow detection uses a **Height-Grid Ridge** approach:
 | `use_median` | bool | `false` | Use median (true) or mean (false) for height |
 | `min_points_per_cell` | int | `3` | Minimum points required per grid cell |
 | `smoothing_window` | int | `5` | Window size for centerline smoothing |
+| `height_threshold_percentile` | double | `0.5` | Percentile for height threshold (0.0-1.0) |
 
 ## Topics
 
@@ -118,6 +123,13 @@ Adjust these parameters based on:
 - Computational performance needs
 
 ## Algorithm Details
+
+### Weighted Centroid Method
+The centerline detection uses a sophisticated weighted centroid approach:
+- **Per-row threshold**: Calculates a height threshold for each y-slice using the `height_threshold_percentile` parameter (default 50th percentile)
+- **Weighted averaging**: Only cells above the threshold contribute to the centerline position
+- **Linear weighting**: Each cell's contribution is weighted by its height above the threshold
+- **Robustness**: This approach naturally handles irregular windrow shapes and varying heights
 
 ### Height Metric Selection
 - **Median**: More robust to outliers, better for noisy data
